@@ -1,0 +1,44 @@
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "movie_recommendation_system"
+version = "0.0.1"
+description = "Movie recommender (semantic + reviews + sentiment) — local Streamlit app."
+authors = ["Abhishek Teotia <you@example.com>"]
+readme = "README.md"
+license = "MIT"
+classifiers = ["Programming Language :: Python :: 3"]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+streamlit = "^1.32.0"
+pandas = "^2.2.2"
+numpy = "^2.0.0"
+scikit-learn = "^1.5.0"
+sentence-transformers = "^2.7.0"
+rapidfuzz = "^3.9.6"
+requests = "^2.32.0"
+tqdm = "^4.67.0"
+python-dotenv = "^1.0.1"
+hnswlib = "^0.8.0"
+nltk = "^3.9.2"
+pyarrow = "^21.0.0"
+spacy = "^3.8.7"
+llama-cpp-python = "^0.3.16"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.6.0"
+
+[tool.ruff]
+line-length = 99
+src = ["movie_recommendation_system"]
+include = ["pyproject.toml", "movie_recommendation_system/**/*.py"]
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["movie_recommendation_system"]
+force-sort-within-sections = true

@@ -1,0 +1,6 @@
+{
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "n_movies": 44471,
+  "emb_dim": 384,
+  "created_at": "2025-10-10T17:56:33.779601+00:00"
+}
