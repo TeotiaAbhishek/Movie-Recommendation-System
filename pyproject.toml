@@ -27,6 +27,7 @@ nltk = "^3.9.2"
 pyarrow = "^21.0.0"
 spacy = "^3.8.7"
 llama-cpp-python = "^0.3.16"
+pillow = "^11.3.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.6.0"

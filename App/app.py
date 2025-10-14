@@ -1,7 +1,6 @@
 # app.py
 from __future__ import annotations
-
-import json, os, re
+import json, os, re, base64, requests
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -11,10 +10,11 @@ import streamlit as st
 import hnswlib
 from sentence_transformers import SentenceTransformer
 from rapidfuzz import process, fuzz
+from io import BytesIO
+from PIL import Image
 
-# Optional offline LLM + spaCy fallback
 try:
-    from llama_cpp import Llama  # pip install llama-cpp-python
+    from llama_cpp import Llama
 except Exception:
     Llama = None
 try:
@@ -23,25 +23,20 @@ try:
 except Exception:
     _HAS_SPACY = False
 
-# ----------------------------- Config -----------------------------
+
+# ---------------- Streamlit Config ----------------
 st.set_page_config(page_title="Movie Recommender", layout="wide")
 ART = Path("../artifacts")
 EMB_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Retrieval defaults (hidden from UI)
-W_SIM = 0.70
-W_SENT = 0.20
-W_POP = 0.10
-USE_MMR = True
-MMR_LAMBDA = 0.70
-TOPK_CAND = 200
-TOPK_SHOW = 12
-
-# Browse
+W_SIM, W_SENT, W_POP = 0.70, 0.20, 0.10
+USE_MMR, MMR_LAMBDA = True, 0.70
+TOPK_CAND, TOPK_SHOW = 200, 12
 BROWSE_PAGE_SIZE = 50
-TITLE_CONF_OK = 80  # fuzzy acceptance threshold for title extraction
+TITLE_CONF_OK = 80
 
-# ------------------------- Cached loaders -------------------------
+
+# ---------------- Load Data ----------------
 @st.cache_data(show_spinner=False)
 def load_movies() -> pd.DataFrame:
     df = pd.read_parquet(ART / "movies_aug.parquet")
@@ -100,10 +95,23 @@ def load_llm() -> "Llama|None":
         return None
     return Llama(model_path=model_path, n_ctx=2048, n_threads=os.cpu_count() or 4)
 
-# --------------------------- Helpers ------------------------------
-def tmdb_poster_url(poster_path: str | None, size: str = "w342") -> str | None:
-    return f"https://image.tmdb.org/t/p/{size}{poster_path}" if isinstance(poster_path,str) and poster_path.strip() else None
 
+# ---------------- Poster Handling ----------------
+@st.cache_data(show_spinner=False)
+def get_fallback() -> str:
+    fallback_path = Path(__file__).parent / "static" / "no_poster.png"
+    return Image.open(fallback_path)
+
+def tmdb_poster_url(poster_path: str | None, size: str = "w342") -> str:
+    if isinstance(poster_path, str) and poster_path.strip():
+        url = f"https://image.tmdb.org/t/p/{size}{poster_path}"
+        r = requests.get(url, timeout=2)
+        content_type = r.headers.get("Content-Type", "")
+        if r.status_code == 200 and any(ext in content_type for ext in ["jpeg", "jpg", "png", "webp"]):
+            return Image.open(BytesIO(r.content))
+    return get_fallback()
+
+# ---------------- Utility Functions ----------------
 def parse_genres_cell(x) -> List[str]:
     if isinstance(x, list):
         if x and isinstance(x[0], dict):
@@ -118,7 +126,7 @@ def parse_genres_cell(x) -> List[str]:
 def knn_query(index: hnswlib.Index, qv: np.ndarray, k: int) -> Tuple[np.ndarray,np.ndarray]:
     labels, distances = index.knn_query(qv.astype("float32"), k=k)
     idxs = labels[0]
-    sims = 1.0 - distances[0]  # cosine similarity
+    sims = 1.0 - distances[0]
     return idxs, sims
 
 def normalize01(x: np.ndarray) -> np.ndarray:
@@ -146,7 +154,8 @@ def mmr(q_vec: np.ndarray, cand_vecs: np.ndarray, cand_order: np.ndarray,
         selected.append(j); pool.remove(j)
     return [int(cand_order[j]) for j in selected]
 
-# ----- Offline LLM utilities (extract titles + summarize) -----
+
+# ---------------- Offline LLM utils ----------------
 def llm_chat(llm: "Llama|None", system: str, user: str, temperature: float = 0.2, max_tokens: int = 256) -> str|None:
     if llm is None: return None
     out = llm.create_chat_completion(
@@ -156,7 +165,6 @@ def llm_chat(llm: "Llama|None", system: str, user: str, temperature: float = 0.2
     return out["choices"][0]["message"]["content"].strip()
 
 def extract_titles_from_prompt(prompt: str, catalog_titles: List[str], llm: "Llama|None", nlp) -> List[Tuple[str,int]]:
-    # 1) Try LLM JSON extraction
     if llm:
         sys = "Extract movie titles from the user text. Return a pure JSON array of strings (titles), nothing else."
         usr = f"Text: {prompt}\nOutput: a JSON array of movie titles mentioned or clearly implied."
@@ -176,7 +184,6 @@ def extract_titles_from_prompt(prompt: str, catalog_titles: List[str], llm: "Lla
                     return sorted(best.items(), key=lambda x:x[1], reverse=True)
             except Exception:
                 pass
-    # 2) Heuristics + spaCy fallback
     candidates = set([q.strip() for q in re.findall(r"[\"“”']([^\"“”']{2,})[\"“”']", prompt)])
     if nlp:
         doc = nlp(prompt)
@@ -191,33 +198,49 @@ def extract_titles_from_prompt(prompt: str, catalog_titles: List[str], llm: "Lla
         for t,s in hits:
             if t not in best or s>best[t]: best[t]=s
         return sorted(best.items(), key=lambda x:x[1], reverse=True)
-    # 3) Fuzzy from full prompt
     res = process.extract(prompt, catalog_titles, scorer=fuzz.WRatio, limit=5)
     return [(r[0], int(r[1])) for r in res]
 
+# ---------------- Summarization (LLM or fallback) ----------------
 def summarize_results_llm(results_df: pd.DataFrame, llm: "Llama|None", sent: np.ndarray|None) -> str:
+    if results_df.empty:
+        return "No results to summarize."
+
     if llm is None:
-        # deterministic summary
         genre_counts = {}
         for x in results_df.get("genres_text", results_df.get("genres", "")).fillna(""):
             for g in parse_genres_cell(x):
-                if g: genre_counts[g] = genre_counts.get(g,0)+1
-        top_genres = ", ".join([g for g,_ in sorted(genre_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]]) or "varied"
+                if g:
+                    genre_counts[g] = genre_counts.get(g, 0) + 1
+
+        top_genres = ", ".join(
+            [g for g, _ in sorted(genre_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]]
+        ) or "varied"
+
         yrs = results_df["year"].dropna().astype(int)
-        span = f"{int(yrs.min())}–{int(yrs.max())}" if not yrs.empty else "varied years"
-        if sent is not None and len(sent)>0:
+        year_span = f"{int(yrs.min())}–{int(yrs.max())}" if not yrs.empty else "varied years"
+
+        if sent is not None and len(sent) > 0:
             m = float(np.nanmean(sent))
-            mood = "very positive" if m>0.7 else "mixed/positive" if m>0.55 else "mixed"
+            mood = (
+                "very positive" if m > 0.7
+                else "mixed/positive" if m > 0.55
+                else "mixed"
+            )
         else:
             mood = "mixed"
-        return f"Leaning toward **{top_genres}**, across **{span}**, with overall **{mood}** reviews."
-    rows = results_df[["title","year","genres_text","overview"]].fillna("").head(12).to_dict(orient="records")
-    sys = "You summarize movie recommendations briefly (1–2 sentences). Be specific but concise."
-    usr = f"Top recommendations: {rows}\nOptional sentiment (0..1 avg): {float(np.nanmean(sent)) if sent is not None and len(sent)>0 else 'n/a'}\nWrite a short summary:"
-    txt = llm_chat(llm, sys, usr, temperature=0.2, max_tokens=120)
-    return txt or "Here are some strong matches."
 
-# ----------------------- Load all artifacts -----------------------
+        return f"Leaning toward **{top_genres}**, across **{year_span}**, with overall **{mood}** reviews."
+
+    rows = results_df[["title", "year", "genres_text", "overview"]].fillna("").head(12).to_dict(orient="records")
+    sys = "You are a concise movie critic. Write a 1–2 sentence summary of these movies, mentioning genres or themes."
+    usr = f"Movies: {rows}\nOptional sentiment average: {float(np.nanmean(sent)) if sent is not None and len(sent) > 0 else 'n/a'}"
+    out = llm_chat(llm, sys, usr, temperature=0.2, max_tokens=120)
+    return out or "Here are some top matches based on your preferences."
+
+
+
+# ---------------- Load Artifacts ----------------
 movies = load_movies()
 emb = load_embeddings()
 index = load_index(emb)
@@ -226,11 +249,10 @@ embedder = load_embedder()
 id_map = load_id_map()
 nlp = load_spacy()
 llm = load_llm()
-
 titles = movies["title"].fillna("").tolist()
-row_by_id = {int(movies.loc[i,"id"]): int(i) for i in range(len(movies))}
 
-# ------------------------------ NAV -------------------------------
+
+# ---------------- UI Tabs ----------------
 st.markdown(
     """
     <style>
@@ -270,7 +292,7 @@ with tabs[0]:
                     st.warning("Matched title not found in table.")
                 else:
                     seed_row = seed_rows.iloc[0]
-                    seed_idx = int(seed_row.name)  # <-- FIX
+                    seed_idx = int(seed_row.name)
                     seed_vec = emb[seed_idx:seed_idx+1]
                     idxs, sims = knn_query(index, seed_vec, k=TOPK_CAND)
                     if len(idxs) and idxs[0] == seed_idx:
@@ -281,15 +303,11 @@ with tabs[0]:
                     final_idxs = idxs[order]; final_sims = sims[order]
                     recs = movies.iloc[final_idxs].copy()
                     st.caption(summarize_results_llm(recs, llm, sent01[final_idxs] if len(final_idxs)>0 else None))
-                    # Ranked list: name → poster → description
                     for rank, (_, row) in enumerate(recs.iterrows(), start=1):
                         st.markdown(f"### {rank}. {row['title']} ({int(row['year']) if pd.notna(row['year']) else '—'})")
-                        poster = tmdb_poster_url(row.get("poster_path"))
-                        if poster: st.image(poster, use_container_width=True)
-                        else: st.info("No poster found")
+                        st.image(tmdb_poster_url(row.get("poster_path")), use_container_width=False)
                         st.write(str(row.get("overview","") or ""))
             else:
-                # vibe search
                 qv = embedder.encode([prompt], normalize_embeddings=True).astype("float32")
                 idxs, sims = knn_query(index, qv, k=TOPK_CAND)
                 pops = movies.loc[idxs, "popularity"].values if "popularity" in movies.columns else None
@@ -300,16 +318,13 @@ with tabs[0]:
                 st.caption(summarize_results_llm(recs, llm, sent01[final_idxs] if len(final_idxs)>0 else None))
                 for rank, (_, row) in enumerate(recs.iterrows(), start=1):
                     st.markdown(f"### {rank}. {row['title']} ({int(row['year']) if pd.notna(row['year']) else '—'})")
-                    poster = tmdb_poster_url(row.get("poster_path"))
-                    if poster: st.image(poster, use_container_width=True)
-                    else: st.info("No poster found")
+                    st.image(tmdb_poster_url(row.get("poster_path")), use_container_width=False)
                     st.write(str(row.get("overview","") or ""))
 
 # ============================= BROWSE ==============================
 with tabs[1]:
     st.title("📚 Browse the catalog")
 
-    # Genre vocabulary
     vocab = set()
     gcol = "genres_text" if "genres_text" in movies.columns else "genres"
     for x in movies[gcol].dropna():
@@ -332,7 +347,6 @@ with tabs[1]:
     with c4:
         sort_by = st.selectbox("Sort by", ["popularity","year","title"])
 
-    # Filter
     view = movies.copy()
     if year_range:
         view = view[view["year"].between(year_range[0], year_range[1], inclusive="both")]
@@ -346,23 +360,39 @@ with tabs[1]:
     ascending = True if sort_by in ("title","year") else False
     view = view.sort_values(sort_by, ascending=ascending, na_position="last")
 
-    # Pagination
+    BROWSE_PAGE_SIZE = 25
     total = len(view)
     total_pages = max(1, (total + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE)
-    pg = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
-    start, end = (pg-1)*BROWSE_PAGE_SIZE, min(pg*BROWSE_PAGE_SIZE, total)
+    if "browse_page" not in st.session_state:
+        st.session_state.browse_page = 1
+    left, mid, right = st.columns([1, 4, 1])
+    with right:
+        st.markdown("<br>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c1:
+            if st.button("◀", key="prev_page", use_container_width=True) and st.session_state.browse_page > 1:
+                st.session_state.browse_page -= 1
+        with c2:
+            st.markdown(
+                f"<p style='text-align:center; font-size:1rem; color:#d0cde1;'>Page {st.session_state.browse_page} of {total_pages}</p>",
+                unsafe_allow_html=True
+            )
+        with c3:
+            if st.button("▶", key="next_page", use_container_width=True) and st.session_state.browse_page < total_pages:
+                st.session_state.browse_page += 1
+
+    pg = st.session_state.browse_page
+    start, end = (pg - 1) * BROWSE_PAGE_SIZE, min(pg * BROWSE_PAGE_SIZE, total)
     st.caption(f"{total:,} movies • showing {start+1:,}–{end:,}")
 
     subset = view.iloc[start:end]
-    cols = st.columns(5)  # more like a catalog grid
+    cols = st.columns(5)
     for j, (_, row) in enumerate(subset.iterrows()):
         with cols[j % 5]:
             title = str(row.get("title",""))
             year = int(row["year"]) if pd.notna(row.get("year")) else None
             st.markdown(f"**{title}**{' ('+str(year)+')' if year else ''}")
-            poster = tmdb_poster_url(row.get("poster_path"))
-            if poster: st.image(poster, use_container_width=True)
-            else: st.info("No poster found")
+            st.image(tmdb_poster_url(row.get("poster_path")), use_container_width=True)
             ov = str(row.get("overview","") or "")
             st.write(ov[:180] + ("…" if len(ov) > 180 else ""))
 
@@ -378,17 +408,13 @@ with tabs[2]:
             best_title = match[0]
             seed_rows = movies[movies["title"] == best_title]
             seed_row = seed_rows.iloc[0]
-            seed_idx = int(seed_row.name)  # <-- FIX
+            seed_idx = int(seed_row.name)
             seed_vec = emb[seed_idx:seed_idx+1]
 
-            # Seed details
             st.markdown(f"### Seed: {seed_row['title']} ({int(seed_row['year']) if pd.notna(seed_row['year']) else '—'})")
-            poster = tmdb_poster_url(seed_row.get("poster_path"))
-            if poster: st.image(poster, use_container_width=False)
-            else: st.info("No poster found")
+            st.image(tmdb_poster_url(seed_row.get("poster_path")), use_container_width=False)
             st.write(str(seed_row.get("overview","") or ""))
 
-            # Retrieve + re-rank
             idxs, sims = knn_query(index, seed_vec, k=TOPK_CAND)
             if len(idxs) and idxs[0] == seed_idx:
                 idxs, sims = idxs[1:], sims[1:]
@@ -400,10 +426,7 @@ with tabs[2]:
 
             st.markdown("## Similar recommendations")
             st.caption(summarize_results_llm(recs, llm, sent01[final_idxs] if len(final_idxs)>0 else None))
-            # Ranked list: name → poster → description
             for rank, (_, row) in enumerate(recs.iterrows(), start=1):
                 st.markdown(f"### {rank}. {row['title']} ({int(row['year']) if pd.notna(row['year']) else '—'})")
-                poster = tmdb_poster_url(row.get("poster_path"))
-                if poster: st.image(poster, use_container_width=True)
-                else: st.info("No poster found")
+                st.image(tmdb_poster_url(row.get("poster_path")), use_container_width=False)
                 st.write(str(row.get("overview","") or ""))
