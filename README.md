@@ -1,290 +1,110 @@
-# 🎬 NLP-Powered Movie Recommendation System
+# NLP-Powered Movie Recommendation System
 
-An intelligent movie recommendation platform that combines **Natural Language Processing (NLP)**, **semantic search**, and **sentiment-aware ranking** to improve movie discovery.
+Describe the kind of film you want in plain English, or name one you liked, and get recommendations that match the meaning of your request, not just its keywords. The system searches 44,471 films using sentence embeddings and approximate nearest neighbour search, then re-ranks results by audience sentiment, popularity and variety. It runs as a Streamlit app.
 
-Unlike traditional recommendation systems that rely only on genres or ratings, this system allows users to search naturally using free-text prompts such as:
+> "Something dark and psychological with a mystery theme"
+>
+> "Films like John Wick"
 
-> "I want something dark and psychological with a mystery theme"
+Built as a team project for 36118 Applied Natural Language Processing at the University of Technology Sydney.
 
-or retrieve recommendations from an existing movie title:
-
-> "John Wick"
-
-The system uses **SBERT embeddings**, **HNSW Approximate Nearest Neighbour search**, **sentiment analysis**, and **reranking techniques** to deliver relevant recommendations in real time.
-
----
-
-## 🚀 Features
-
-### 1. Free-text Recommendation Mode
-Users can describe movies using natural language.
-
-Example:
+## How it works
 
 ```text
-Looking for a sci-fi movie with space exploration and emotional storytelling
+Movie metadata + user reviews
+        |
+Review sentiment (VADER), recency-weighted per movie
+        |
+Text per movie: title, overview, genres, review snippets
+        |
+SBERT embeddings (all-MiniLM-L6-v2, 384 dimensions)
+        |
+HNSW cosine index (hnswlib)
+        |
+Query: free text or a movie title
+        |
+Top 200 nearest neighbours
+        |
+Score fusion: 0.7 similarity + 0.2 sentiment + 0.1 popularity
+        |
+MMR re-ranking for variety, top 12 shown
 ```
 
-The system interprets intent semantically instead of relying on keywords.
+**Offline (notebook):** `notebooks/recommender.ipynb` scores each review with VADER, aggregates sentiment per movie with an 18-month half-life so recent reviews count more, shrinks movies with few reviews towards neutral, builds a text description per movie, embeds it and saves an HNSW index. Everything the app needs is saved to `artifacts/`.
 
----
+**Online (app):** `App/app.py` embeds the query, retrieves 200 candidates from the index, blends similarity with sentiment and popularity, and uses Maximal Marginal Relevance (MMR, lambda 0.7) so the final 12 aren't near-duplicates of each other.
 
-### 2. Similar Movies by Title
+## Features
 
-Users can enter a movie title and retrieve semantically similar recommendations.
+| Tab | What it does |
+|---|---|
+| Home | Type a request in natural language. If it names films, they're found with fuzzy matching (RapidFuzz) or an optional local LLM, and used as seeds; otherwise the text itself is the query. |
+| Browse | Filter the catalogue by genre and year range, sorted by popularity, year or title. |
+| Similar by title | Pick a film and get the 12 most similar, with posters from TMDb. |
 
-Example:
+When a local LLM is configured, it also writes a one-line summary of each result set. Without one, the app falls back to fuzzy matching and a rule-based summary, so it works fully offline.
 
-```text
-Input: John Wick
-Output: John Wick Chapter 2, Nobody, Atomic Blonde
-```
+## Data
 
-Supports:
-
-- Exact matching
-- Fuzzy matching
-- NLP-based title extraction
-
----
-
-### 3. Browse Mode
-
-Interactive browsing interface supporting:
-
-- Genre filtering
-- Release year filtering
-- Popularity sorting
-- Catalog exploration
-
----
-
-### 4. Sentiment-aware Ranking
-
-Recommendations combine:
-
-- Semantic similarity
-- Audience sentiment
-- Popularity signals
-
-Final score:
-
-```python
-Final Score =
-0.7 × Semantic Similarity +
-0.2 × Sentiment +
-0.1 × Popularity
-```
-
----
-
-## 🏗 Architecture
-
-```text
-User Input (Title / Free Text)
-            ↓
-NLP Title Extraction / Embedding
-            ↓
-SBERT Embeddings
-            ↓
-HNSW ANN Search
-            ↓
-Score Fusion
-(Similarity + Sentiment + Popularity)
-            ↓
-MMR Reranking
-            ↓
-Explanation Layer
-            ↓
-Streamlit Interface
-```
-
----
-
-## 🛠 Tech Stack
-
-### NLP & Recommendation
-
-- Sentence Transformers (all-MiniLM-L6-v2)
-- SBERT Embeddings
-- HNSW (hnswlib)
-- VADER Sentiment Analysis
-- spaCy
-- RapidFuzz
-- Regex
-
-### Backend
-
-- Python
-- NumPy
-- Pandas
-- FastAPI (planned)
-
-### Frontend
-
-- Streamlit
-
-### Models & Retrieval
-
-- Semantic Search
-- Approximate Nearest Neighbour Retrieval
-- Maximal Marginal Relevance (MMR)
-- Score Fusion
-
----
-
-## 📊 Dataset
-
-Source:
-
-- TMDb
-- IMDb metadata
-- Kaggle movie datasets
-
-Dataset includes:
-
-- Movie titles
-- Overview text
-- Genres
-- Popularity metrics
-- Ratings
-- Reviews
-
-Scale:
-
-- **44,471 movies**
-- **384-dimensional embeddings**
-- **Sub-second retrieval latency**
-
----
-
-## 📁 Project Structure
-
-```text
-movie_recommendation_system/
-
-│── app/
-│   ├── home.py
-│   ├── browse.py
-│   └── recommendation_ui.py
-│
-│── models/
-│   ├── embedding_model.py
-│   ├── retrieval.py
-│   ├── sentiment.py
-│   └── reranking.py
-│
-│── api/
-│   ├── extract_api.py
-│   ├── recommendation_api.py
-│   └── sentiment_api.py
-│
-│── artifacts/
-│   ├── embeddings.npy
-│   ├── hnsw_cosine.idx
-│   ├── review_sentiment_01.npy
-│   ├── movies_aug.parquet
-│   └── id_map.json
-│
-│── data/
-│
-│── requirements.txt
-│── README.md
-```
-
----
-
-## ⚡ Performance
-
-| Metric | Result |
-|----------|---------|
-| Movies processed | 44,471 |
-| Embedding model | SBERT all-MiniLM-L6-v2 |
+| Item | Value |
+|---|---|
+| Movies | 44,471 |
+| Sources | TMDb and IMDb metadata, Kaggle movie and review datasets |
+| Embedding model | sentence-transformers/all-MiniLM-L6-v2 |
 | Embedding size | 384 |
-| Retrieval method | HNSW ANN |
-| Query latency | < 0.5 sec |
-| Search type | Semantic |
+| Index | HNSW, cosine similarity |
 
----
+## How to run
 
-## 📈 Key Outcomes
+Requires Python 3.11.
 
-✅ Real-time semantic recommendation engine
+```bash
+pip install streamlit pandas numpy scikit-learn sentence-transformers hnswlib rapidfuzz requests pyarrow pillow spacy
+python -m spacy download en_core_web_sm   # optional, improves title extraction
 
-✅ Sub-second retrieval over 44k+ movies
-
-✅ Multi-modal search:
-
-- Free text
-- Title-based
-- Browse mode
-
-✅ Sentiment-enhanced recommendation quality
-
-✅ Scalable ANN retrieval pipeline
-
----
-
-## 🔮 Future Improvements
-
-Planned enhancements:
-
-- Collaborative filtering
-- User profile personalization
-- Cloud deployment
-- FastAPI production APIs
-- Advanced sentiment models (RoBERTa / DistilBERT)
-- Hybrid recommendation engine
-- Online inference pipeline
-
----
-
-## 👥 Team
-
-### Recommendation Model & Testing
-**Abhishek Teotia**
-
-- Recommendation engine
-- Retrieval pipeline
-- API integration
-- System testing
-
-### NLP Query Extraction
-Muskan Choudhary
-
-### Sentiment Module
-Justin Govanxa
-
-### Frontend & LLM Integration
-Yuzhong Wang
-
----
-
-## 📷 Application Preview
-
-### Free-text Search
-
-```text
-"I want a horror movie with supernatural elements"
+cd App
+streamlit run app.py
 ```
 
-### Similar Movies
+The prebuilt index and embeddings in `artifacts/` are loaded at start-up, so there is no training step. To rebuild them, run `notebooks/recommender.ipynb`.
 
-```text
-Input: John Wick
+**Optional local LLM:** install `llama-cpp-python` and point `LLM_MODEL_PATH` to a GGUF model file to enable LLM title extraction and summaries.
+
+```bash
+export LLM_MODEL_PATH=/path/to/model.gguf
 ```
 
-### Browse Mode
+## Project structure
 
-Genre + Popularity + Release Year filtering
+```text
+├── App/
+│   ├── app.py                  Streamlit app: search, ranking and UI
+│   └── static/no_poster.png
+├── artifacts/
+│   ├── embeddings.npy          384-d embedding per movie
+│   ├── hnsw_cosine.idx         HNSW index
+│   ├── review_sentiment_01.npy sentiment per movie, scaled 0 to 1
+│   ├── movies_aug.parquet      movie metadata
+│   ├── id_map.json
+│   └── config.json
+├── notebooks/
+│   ├── movie.ipynb             data exploration and cleaning
+│   └── recommender.ipynb       sentiment, embeddings and index build
+└── pyproject.toml
+```
 
----
+## Next steps
 
-## 📜 License
+- Measure ranking quality offline (precision@k against held-out user ratings) to tune the 0.7 / 0.2 / 0.1 weights.
+- Add collaborative filtering for a hybrid recommender once user histories are available.
+- Replace VADER with a transformer sentiment model.
+- Deploy the app and expose search through an API.
 
-Educational and research use only.
+## Team
 
-Built as part of:
+- **Abhishek Teotia:** recommendation engine, retrieval pipeline, integration and testing
+- **Muskan Choudhary:** NLP query extraction
+- **Justin Govanxa:** sentiment module
+- **Yuzhong Wang:** front end and LLM integration
 
-**36118 Applied Natural Language Processing**  
-University of Technology Sydney
+For educational and research use.
