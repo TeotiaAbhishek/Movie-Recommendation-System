@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+      - name: Offline evaluation on the real catalogue
+        run: python -m movie_recommendation_system.evaluate --seeds 200
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t movie-recommender .
+      - name: Smoke test the API
+        run: |
+          docker run -d -p 8000:8000 --name api movie-recommender
+          for i in $(seq 1 60); do curl -sf localhost:8000/health && break; sleep 2; done
+          curl -sf "localhost:8000/similar?title=toy%20story&k=5" | tee similar.json
+          grep -q "Toy Story 2" similar.json
+          curl -sf "localhost:8000/search?q=space%20exploration%20and%20loneliness&k=5" | tee search.json
+          grep -q '"results"' search.json

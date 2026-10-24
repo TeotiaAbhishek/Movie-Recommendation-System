@@ -1,45 +1,36 @@
 [build-system]
-requires = ["poetry-core>=1.9.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-[tool.poetry]
-name = "movie_recommendation_system"
-version = "0.0.1"
-description = "Movie recommender (semantic + reviews + sentiment) — local Streamlit app."
-authors = ["Abhishek Teotia <you@example.com>"]
+[project]
+name = "movie-recommendation-system"
+version = "1.0.0"
+description = "Semantic movie recommendations: SBERT embeddings, HNSW search and sentiment-aware ranking"
 readme = "README.md"
-license = "MIT"
-classifiers = ["Programming Language :: Python :: 3"]
+requires-python = ">=3.10"
+authors = [{ name = "Abhishek Teotia" }]
+dependencies = [
+    "sentence-transformers>=2.7",
+    "hnswlib>=0.8",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pyarrow>=15",
+    "rapidfuzz>=3.9",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.11,<3.12"
-streamlit = "^1.32.0"
-pandas = "^2.2.2"
-numpy = "^2.0.0"
-scikit-learn = "^1.5.0"
-sentence-transformers = "^2.7.0"
-rapidfuzz = "^3.9.6"
-requests = "^2.32.0"
-tqdm = "^4.67.0"
-python-dotenv = "^1.0.1"
-hnswlib = "^0.8.0"
-nltk = "^3.9.2"
-pyarrow = "^21.0.0"
-spacy = "^3.8.7"
-llama-cpp-python = "^0.3.16"
-pillow = "^11.3.0"
+[project.optional-dependencies]
+app = ["streamlit>=1.36", "requests>=2.32", "pillow>=10"]
+llm = ["llama-cpp-python>=0.3", "spacy>=3.7"]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.4"]
 
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.6.0"
+[tool.setuptools]
+packages = ["movie_recommendation_system"]
 
 [tool.ruff]
-line-length = 99
-src = ["movie_recommendation_system"]
-include = ["pyproject.toml", "movie_recommendation_system/**/*.py"]
+line-length = 110
+extend-exclude = ["notebooks"]
 
-[tool.ruff.lint]
-extend-select = ["I"]
-
-[tool.ruff.lint.isort]
-known-first-party = ["movie_recommendation_system"]
-force-sort-within-sections = true
+[tool.pytest.ini_options]
+testpaths = ["tests"]
