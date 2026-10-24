@@ -1,6 +1,6 @@
 # NLP-Powered Movie Recommendation System
 
-Describe the kind of film you want in plain English, or name one you liked, and get recommendations that match the meaning of your request, not just its keywords. The system searches 44,471 films using sentence embeddings and approximate nearest neighbour search, then re-ranks results by audience sentiment, popularity and variety. It runs as a Streamlit app.
+Describe the kind of film you want in plain English, or name one you liked, and get recommendations that match the meaning of your request, not just its keywords. The system searches 44,471 films using sentence embeddings and approximate nearest neighbour search, then re-ranks results by audience sentiment, popularity and variety. It runs as a Streamlit app and a FastAPI service, with tests, CI and a Docker image.
 
 > "Something dark and psychological with a mystery theme"
 >
@@ -25,7 +25,7 @@ Query: free text or a movie title
         |
 Top 200 nearest neighbours
         |
-Score fusion: 0.7 similarity + 0.2 sentiment + 0.1 popularity
+Score fusion: 0.7 similarity + 0.2 sentiment + 0.1 log-popularity
         |
 MMR re-ranking for variety, top 12 shown
 ```
@@ -38,7 +38,7 @@ MMR re-ranking for variety, top 12 shown
 
 | Tab | What it does |
 |---|---|
-| Home | Type a request in natural language. If it names films, they're found with fuzzy matching (RapidFuzz) or an optional local LLM, and used as seeds; otherwise the text itself is the query. |
+| Ask | Type a request in natural language. If it names films, they're found with fuzzy matching (RapidFuzz) or an optional local LLM, and used as seeds; otherwise the text itself is the query. |
 | Browse | Filter the catalogue by genre and year range, sorted by popularity, year or title. |
 | Similar by title | Pick a film and get the 12 most similar, with posters from TMDb. |
 
@@ -54,51 +54,90 @@ When a local LLM is configured, it also writes a one-line summary of each result
 | Embedding size | 384 |
 | Index | HNSW, cosine similarity |
 
+## Results
+
+There are no user ratings in the data, so `python -m movie_recommendation_system.evaluate` measures proxy metrics for similar-title recommendations. It uses 500 random well-known seed movies (100+ votes), 12 recommendations each:
+
+| Ranking | Genre precision@12 | Diversity | Catalogue coverage | Latency p50 / p95 |
+|---|---:|---:|---:|---:|
+| Similarity only | 0.818 | 0.528 | 10.5% | 3.6 / 5.4 ms |
+| + sentiment and popularity | 0.822 | 0.528 | 10.2% | 3.4 / 4.9 ms |
+| + MMR (default) | 0.817 | 0.543 | 10.4% | 4.0 / 5.9 ms |
+
+- **Genre precision@12:** share of recommendations that share at least one genre with the seed movie.
+- **Diversity:** 1 minus the average cosine similarity between movies in the same list.
+- **Latency:** retrieval and ranking time. Free-text search adds the SBERT encoding of the query.
+
+**What this shows:** semantic retrieval does most of the work. About 82% of recommendations share a genre with the seed, and HNSW answers in a few milliseconds. Sentiment and popularity fusion barely changes the lists. MMR lifts diversity by about 3% at almost no cost to relevance. Measuring real quality would need user ratings or click data, which is the next step.
+
 ## How to run
 
-Requires Python 3.11.
+Requires Python 3.10+.
 
 ```bash
-pip install streamlit pandas numpy scikit-learn sentence-transformers hnswlib rapidfuzz requests pyarrow pillow spacy
-python -m spacy download en_core_web_sm   # optional, improves title extraction
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU build, much smaller
+pip install -e ".[app,dev]"
 
-cd App
-streamlit run app.py
+make app        # Streamlit app at localhost:8501
+make api        # FastAPI at localhost:8000, docs at /docs
+make test       # unit and API tests on a tiny in-memory catalogue (no downloads)
+make evaluate   # offline metrics above
 ```
 
-The prebuilt index and embeddings in `artifacts/` are loaded at start-up, so there is no training step. To rebuild them, run `notebooks/recommender.ipynb`.
+The prebuilt index, embeddings and metadata in `artifacts/` load at start-up. The sentence model downloads on the first free-text search. Title search and browsing work without it. To rebuild the artifacts, run `notebooks/recommender.ipynb`.
 
-**Optional local LLM:** install `llama-cpp-python` and point `LLM_MODEL_PATH` to a GGUF model file to enable LLM title extraction and summaries.
+**Optional local LLM:** `pip install -e ".[llm]"` and set `LLM_MODEL_PATH` to a GGUF model file. The app then uses it to extract titles from requests and to summarise results. Without it, the app falls back to quoted phrases, spaCy entities and a rule-based summary.
+
+### API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /search?q=slow-burn mystery in a small town&k=12` | free-text recommendations |
+| `GET /similar?title=john wick&k=12` | movies similar to a title (typo-tolerant; 404 if nothing matches) |
+| `GET /genres` | genre list |
+| `GET /health` | status and catalogue size |
+
+### Docker
 
 ```bash
-export LLM_MODEL_PATH=/path/to/model.gguf
+docker build -t movie-recommender .
+docker run -p 8000:8000 movie-recommender
 ```
+
+The image bundles the CPU build of PyTorch, the sentence model and the artifacts, so it starts without network access.
+
+### Live demo (Streamlit Community Cloud)
+
+1. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub.
+2. Choose **Create app**, pick this repository, branch `main` and main file `App/app.py`, then set Python to 3.11 under Advanced settings.
+3. Deploy. `requirements.txt` installs the CPU build of PyTorch to stay within the free tier's memory.
+
+## Testing and CI
+
+GitHub Actions runs on every push and pull request. It checks linting with ruff, runs the tests (ranking maths, MMR, title matching, browse filters and every API endpoint, on a fake 8-movie catalogue) and the offline evaluation on the real catalogue. It then builds the Docker image and smoke-tests `/similar` and `/search`.
 
 ## Project structure
 
 ```text
-├── App/
-│   ├── app.py                  Streamlit app: search, ranking and UI
-│   └── static/no_poster.png
-├── artifacts/
-│   ├── embeddings.npy          384-d embedding per movie
-│   ├── hnsw_cosine.idx         HNSW index
-│   ├── review_sentiment_01.npy sentiment per movie, scaled 0 to 1
-│   ├── movies_aug.parquet      movie metadata
-│   ├── id_map.json
-│   └── config.json
-├── notebooks/
-│   ├── movie.ipynb             data exploration and cleaning
-│   └── recommender.ipynb       sentiment, embeddings and index build
-└── pyproject.toml
+├── movie_recommendation_system/
+│   ├── recommender.py          loads artifacts; search, similar, browse
+│   ├── ranking.py              score fusion and MMR
+│   ├── assistant.py            optional LLM / spaCy title extraction and summaries
+│   ├── api.py                  FastAPI service
+│   └── evaluate.py             offline metrics
+├── App/app.py                  Streamlit UI (no ranking logic of its own)
+├── artifacts/                  embeddings, HNSW index, sentiment, metadata
+├── notebooks/                  data cleaning, sentiment, embeddings and index build
+├── tests/
+├── Dockerfile
+└── .github/workflows/ci.yml
 ```
 
 ## Next steps
 
-- Measure ranking quality offline (precision@k against held-out user ratings) to tune the 0.7 / 0.2 / 0.1 weights.
+- Tune the 0.7 / 0.2 / 0.1 weights against user ratings (for example MovieLens) instead of genre overlap.
 - Add collaborative filtering for a hybrid recommender once user histories are available.
 - Replace VADER with a transformer sentiment model.
-- Deploy the app and expose search through an API.
 
 ## Team
 

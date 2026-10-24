@@ -1,8 +1,14 @@
-loguru
-mkdocs
-pip
-python-dotenv
-ruff
-tqdm
-typer
--e .
+# Runtime dependencies for the Streamlit app and API (Streamlit Community Cloud reads this file).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+sentence-transformers>=2.7
+hnswlib>=0.8
+numpy>=1.26
+pandas>=2.2
+pyarrow>=15
+rapidfuzz>=3.9
+streamlit>=1.36
+requests>=2.32
+pillow>=10
+fastapi>=0.110
+uvicorn>=0.29
